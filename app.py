@@ -1,324 +1,217 @@
 import streamlit as st
+from openai import OpenAI
 import requests
-import json
 import datetime
-import random
-import time
-from firebase_admin import credentials, firestore, initialize_app, get_app
+import json
 
-# --- CONFIGURATION ---
-# In a real deployment, put these in st.secrets
-GEMINI_API_KEY = "AIzaSyB6QbCSwM8eiwZJzS0qCL8tGZVaTADYAnY"
-WEATHER_API_KEY = "0ed98274f6b98d29698832a7e20d2d9e" 
-APP_ICON = "https://methodshop.com/apps/smartmealplanner/chef-hat-icon.png"
-SPLASH_IMAGE = "https://methodshop.com/apps/smartmealplanner/family-cooking.jpg"
-
-# --- PAGE SETUP ---
+# --- 1. PAGE SETUP (Chef Hat Favicon) ---
 st.set_page_config(
     page_title="Meal Planner AI",
-    page_icon="🍳",
-    layout="centered",
-    initial_sidebar_state="collapsed"
+    page_icon="https://methodshop.com/apps/smartmealplanner/chef-hat-icon.png",
+    layout="centered"
 )
 
-# --- CUSTOM STYLING (Tailwind-ish) ---
+# --- 2. CUSTOM CLEAN THEME (High Contrast) ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap');
+    /* Global Styles */
+    .stApp { background-color: #FFFFFF; }
+    h1, h2, h3 { color: #0F172A !important; font-weight: 800 !important; }
+    p { color: #334155 !important; }
     
-    html, body, [class*="css"] {
-        font-family: 'Plus Jakarta Sans', sans-serif;
-        color: #1e293b;
-    }
-    
-    /* Hide Streamlit Elements */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    /* Custom Components */
-    .card {
-        background: white;
-        padding: 2rem;
-        border-radius: 2rem;
-        box-shadow: 0 10px 30px -10px rgba(0,0,0,0.1);
-        border: 1px solid #f1f5f9;
-        margin-bottom: 1.5rem;
-    }
-    
-    .big-button {
-        display: block;
-        width: 100%;
-        background-color: #ea580c;
-        color: white;
+    /* Header & Weather Styles */
+    .header-logo { display: block; margin: 0 auto; width: 80px; }
+    .weather-box {
+        background: #F8FAFC;
+        padding: 10px 20px;
+        border-radius: 50px;
+        border: 1px solid #E2E8F0;
         text-align: center;
-        padding: 1rem;
-        border-radius: 1.5rem;
-        font-weight: 800;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        text-decoration: none;
-        box-shadow: 0 10px 20px -5px rgba(234, 88, 12, 0.4);
-        transition: all 0.2s;
-    }
-    .big-button:hover {
-        background-color: #c2410c;
-        transform: translateY(-2px);
-    }
-
-    .weather-widget {
-        background: #0f172a;
-        color: white;
-        padding: 0.5rem 1rem;
-        border-radius: 1rem;
-        font-size: 0.8rem;
         font-weight: 700;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        float: right;
+        color: #2563eb;
     }
 
-    /* Tabs Styling */
-    div[data-testid="stHorizontalBlock"] button {
-        border-radius: 20px;
+    /* Inviting Card Design */
+    .meal-card {
+        background: white;
+        padding: 24px;
+        border-radius: 24px;
+        border: 1px solid #E2E8F0;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+        margin-bottom: 20px;
+    }
+    .day-badge {
+        background: #DBEAFE;
+        color: #2563EB;
+        font-weight: 900;
+        font-size: 11px;
+        padding: 4px 12px;
+        border-radius: 10px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    
+    /* Input Styling */
+    .stTextInput>div>div>input, .stTextArea>div>textarea {
+        border-radius: 12px !important;
+        border: 1px solid #CBD5E1 !important;
+    }
+    
+    /* Primary Action Buttons */
+    .stButton>button {
+        width: 100%;
+        border-radius: 12px;
+        background-color: #2563EB !important;
+        color: white !important;
+        font-weight: 800 !important;
+        height: 3.5rem;
         border: none;
-        background-color: transparent;
-        font-weight: bold;
+        box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.3);
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- SESSION STATE ---
-if 'view' not in st.session_state: st.session_state.view = 'splash'
-if 'user_id' not in st.session_state: st.session_state.user_id = None
+# --- 3. SESSION LOGIC ---
+if 'unlocked' not in st.session_state: st.session_state.unlocked = False
+if 'current_tab' not in st.session_state: st.session_state.current_tab = "Plan"
 if 'meal_plan' not in st.session_state: st.session_state.meal_plan = None
-if 'prefs' not in st.session_state: 
-    st.session_state.prefs = {
-        'location': 'Raleigh, NC', 
-        'size': 4, 
-        'diet': '', 
-        'unit': 'imperial'
-    }
+if 'starred' not in st.session_state: st.session_state.starred = []
 
-# --- HELPERS ---
-def get_weather(location):
+# API Client
+try:
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    WEATHER_KEY = st.secrets["WEATHER_API_KEY"]
+    UNSPLASH_KEY = st.secrets["UNSPLASH_ACCESS_KEY"]
+except Exception as e:
+    st.error("Missing API Keys in Streamlit Secrets Dashboard.")
+    st.stop()
+
+# --- 4. VIEW: SPLASH SCREEN ---
+if not st.session_state.unlocked:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    # Centering via Columns
+    c1, c2, c3 = st.columns([1,2,1])
+    with c2:
+        st.image("https://methodshop.com/apps/smartmealplanner/chef-hat-icon.png", width=100)
+    
+    st.markdown("<h1 style='text-align: center; font-size: 3rem;'>Meal Planner AI</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #2563eb; font-weight: 800; font-style: italic; font-size: 1.2rem; margin-top:-20px;'>Eat Better, Planned Simpler.</p>", unsafe_allow_html=True)
+    
+    st.image("https://methodshop.com/apps/smartmealplanner/family-cooking.jpg", use_container_width=True)
+    
+    st.markdown("<p style='text-align: center; font-size: 1.1rem; padding: 10px 40px;'>Join thousands of families using AI to craft the perfect weekly menu based on your tastes and the weather.</p>", unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("GET STARTED", type="primary"):
+        st.session_state.unlocked = True
+        st.rerun()
+    st.stop()
+
+# --- 5. VIEW: MAIN INTERFACE ---
+
+# 5a. Top Navigation & Weather Header
+def get_weather_data(loc):
     try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={location}&units={st.session_state.prefs['unit']}&appid={WEATHER_API_KEY}"
-        r = requests.get(url)
-        if r.status_code == 200:
-            data = r.json()
-            return {
-                'temp': round(data['main']['temp']),
-                'condition': data['weather'][0]['main'],
-                'icon': data['weather'][0]['icon']
-            }
-    except:
-        pass
-    return {'temp': '--', 'condition': 'Unknown', 'icon': ''}
+        r = requests.get(f"https://api.openweathermap.org/data/2.5/weather?q={loc}&appid={WEATHER_KEY}&units=imperial")
+        data = r.json()
+        return f"{round(data['main']['temp'])}°F, {data['weather'][0]['main']}", data['name']
+    except: return "--", "Unknown"
 
-def call_gemini(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
-    headers = {'Content-Type': 'application/json'}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"}
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()['candidates'][0]['content']['parts'][0]['text']
-    except Exception as e:
-        st.error(f"AI Error: {str(e)}")
-        return None
+# Preferences stored in sidebar for cleanliness
+with st.sidebar:
+    st.image("https://methodshop.com/apps/smartmealplanner/chef-hat-icon.png", width=60)
+    st.header("Preferences")
+    p_loc = st.text_input("Family Location", "Raleigh, NC")
+    p_size = st.number_input("Household Size", min_value=1, value=3)
+    p_diet = st.text_area("Dietary Restrictions", "Pescatarian, no dairy")
+    p_favs = st.text_area("Favorite Meals/Ingredients", "Salmon, Broccoli, Tacos")
+    p_unit = st.selectbox("Scale", ["Fahrenheit", "Celsius"])
+    if st.button("Reset Session"): 
+        st.session_state.clear()
+        st.rerun()
 
-def generate_plan(user_input):
-    weather = get_weather(st.session_state.prefs['location'])
-    today = datetime.date.today().strftime("%B %d, %Y")
-    
-    prompt = f"""
-    Act as a Michelin-star family meal planner.
-    CONTEXT:
-    - Date: {today}
-    - Weather: {weather['condition']}, {weather['temp']} degrees.
-    - Family Size: {st.session_state.prefs['size']} people.
-    - Diet: {st.session_state.prefs['diet']}.
-    - User Request: {user_input}
+weather_str, city_name = get_weather_data(p_loc)
 
-    TASK: Create a 7-day plan (5 dinners, 2 weekend dinners, 2 weekend brunches).
-    
-    REQUIREMENTS:
-    1. Real grocery quantities (e.g. "2 lbs chicken" not "2 cups").
-    2. Suggest holidays if applicable.
-    3. JSON Format.
-    
-    OUTPUT JSON:
-    {{
-        "meals": [
-            {{
-                "day": "Monday",
-                "type": "Dinner",
-                "name": "Title",
-                "description": "Short description...",
-                "emojis": "🍗",
-                "prep": "15m", "cook": "30m",
-                "ingredients": [
-                    {{"item": "Chicken Breast", "qty": "2 lbs", "category": "Meat"}}
-                ]
-            }}
-        ],
-        "swaps": [
-            {{"name": "Quick Tacos", "emojis": "🌮"}}
-        ]
-    }}
-    """
-    
-    with st.spinner("👨‍🍳 Chef is thinking..."):
-        result = call_gemini(prompt)
-        if result:
-            st.session_state.meal_plan = json.loads(result)
-            st.session_state.view = 'planner'
-            st.rerun()
+# Header Row
+head1, head2 = st.columns([2, 1])
+with head1:
+    st.markdown("<h2 style='margin:0;'>Menu Planner</h2>", unsafe_allow_html=True)
+with head2:
+    st.markdown(f"<div class='weather-box'>{city_name} • {weather_str}</div>", unsafe_allow_html=True)
 
-# --- VIEWS ---
+# Tabs
+tab_p, tab_l, tab_f = st.tabs(["📅 Plan", "🛒 Shopping", "⭐ Favorites"])
 
-# 1. SPLASH SCREEN
-if st.session_state.view == 'splash':
-    st.image(SPLASH_IMAGE, use_column_width=True)
+# --- TAB: PLANNER ---
+with tab_p:
+    user_context = st.text_area("What's happening this week?", placeholder="e.g. Late work Tuesday, son loves spicy food, Anniversary Sunday...")
     
-    st.markdown(f"""
-    <div style="text-align: center; margin-top: -20px; background: white; border-radius: 2rem; padding: 2rem; position: relative; z-index: 10;">
-        <img src="{APP_ICON}" style="width: 60px; margin-bottom: 1rem;">
-        <h1 style="margin: 0; font-size: 2.5rem; font-weight: 900;">Meal Planner <span style="color: #ea580c;">AI</span></h1>
-        <p style="color: #64748b; font-weight: bold; letter-spacing: 2px; font-size: 0.8rem; text-transform: uppercase;">Eat Better, Planned Simpler.</p>
-        <p style="margin-top: 1rem; color: #475569;">Join thousands of families using AI to craft the perfect weekly menu.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Sign in with Google", use_container_width=True, type="primary"):
-            st.session_state.user_id = "demo_user" # Mock login for now
-            st.session_state.view = 'planner'
-            st.rerun()
-    with col2:
-        if st.button("Guest Mode", use_container_width=True):
-            st.session_state.user_id = "guest"
-            st.session_state.view = 'planner'
-            st.rerun()
+    if st.button("CREATE WEEKLY PLAN"):
+        with st.spinner("AI Chef is crafting your recipes..."):
+            prompt = f"""
+            Act as a Michelin-star meal planner for {p_size} people in {p_loc} ({weather_str}).
+            Avoid: {p_diet}. Preferences: {p_favs}. User context: {user_context}.
+            
+            Deliver a week: 5 weeknight dinners, 2 weekend dinners, 2 weekend brunches.
+            RULES: 
+            1. Every meal must have a Protein and a Side Dish. 
+            2. Prep/cook times included. 1-3 Emojis. 
+            3. SHOPPING LIST: This is for a grocery store. Convert quantities to "1 jar of mayo", "1 stick of butter", "1 head of lettuce".
+            
+            JSON FORMAT ONLY:
+            {{ "meals": [{{ "day": "Monday", "title": "", "emojis": "", "protein": "", "side": "", "prep": "", "cook": "" }}],
+               "shopping": {{ "combined": ["1 jar Mayo"], "pantry": ["Salt", "Olive Oil"] }},
+               "swaps": ["Alt Meal 1"] }}
+            """
+            try:
+                res = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={ "type": "json_object" }
+                )
+                st.session_state.meal_plan = json.loads(res.choices[0].message.content)
+            except Exception as e:
+                st.error(f"AI Connection Failure: {e}")
 
-# 2. MAIN APP
-else:
-    # -- Header --
-    weather = get_weather(st.session_state.prefs['location'])
-    
-    col_brand, col_weather = st.columns([2, 1])
-    with col_brand:
-        st.markdown(f"### <img src='{APP_ICON}' width='25' style='vertical-align:middle'> MEAL PLANNER AI", unsafe_allow_html=True)
-    with col_weather:
-        st.markdown(f"""
-        <div class="weather-widget">
-            <span>{st.session_state.prefs['location'].split(',')[0].upper()}</span>
-            <span>{weather['temp']}°</span>
-            <img src="http://openweathermap.org/img/wn/{weather['icon']}.png" width="20">
-        </div>
-        """, unsafe_allow_html=True)
+    if st.session_state.meal_plan:
+        for m in st.session_state.meal_plan['meals']:
+            # Card Display
+            st.markdown(f"""
+            <div class="meal-card">
+                <span class="day-badge">{m['day']}</span>
+                <h2 style='margin-bottom:4px;'>{m['emojis']} {m['title']}</h2>
+                <p style='margin-bottom:8px;'><strong>{m['protein']}</strong> with <strong>{m['side']}</strong></p>
+                <p style='font-size:11px; font-weight:bold; color:#64748B;'>🕒 {m['prep']} PREP • 🔥 {m['cook']} COOK</p>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button(f"Star {m['title']}", key=m['title']):
+                if m['title'] not in st.session_state.starred:
+                    st.session_state.starred.append(m['title'])
+                    st.toast("Saved to Favorites!")
+
+# --- TAB: SHOPPING ---
+with tab_l:
+    if st.session_state.meal_plan:
+        st.markdown("### Total Grocery List")
+        st.caption("AI combined list for your family size")
+        for item in st.session_state.meal_plan['shopping']['combined']:
+            st.checkbox(item, key=f"shop_{item}")
+            
+        st.markdown("### Check Your Pantry")
+        pantry_list = ", ".join(st.session_state.meal_plan['shopping']['pantry'])
+        st.info(pantry_list)
         
-    st.markdown("---")
+        st.divider()
+        share_body = f"Meal Plan {datetime.date.today()}:\n\n" + "\n".join(st.session_state.meal_plan['shopping']['combined'])
+        st.text_area("SMS Share Text (Timestamp Included)", share_body, height=150)
+    else:
+        st.info("Start your plan to generate a list.")
 
-    # -- Tabs --
-    tab_plan, tab_shop, tab_prefs = st.tabs(["📅 Plan", "🛒 Shop", "⚙️ Settings"])
-
-    # -- TAB: PLANNER --
-    with tab_plan:
-        st.markdown("### Plan Your Week")
-        
-        # Input Card
-        with st.container():
-            user_request = st.text_area("What are you craving?", placeholder="e.g. Healthy dinners, taco tuesday...", height=100)
-            if st.button("GENERATE MENU ✨", use_container_width=True, type="primary"):
-                generate_plan(user_request)
-
-        # Results
-        if st.session_state.meal_plan:
-            st.success("Menu Generated!")
-            
-            for meal in st.session_state.meal_plan.get('meals', []):
-                with st.expander(f"{meal.get('day')} | {meal.get('emojis')} {meal.get('name')}", expanded=True):
-                    st.write(f"_{meal.get('description')}_")
-                    cols = st.columns(2)
-                    cols[0].caption(f"🕒 Prep: {meal.get('prep')}")
-                    cols[1].caption(f"🔥 Cook: {meal.get('cook')}")
-                    
-                    if st.button(f"Swap {meal.get('day')}", key=f"swap_{meal.get('id', 'x')}"):
-                        st.info("Swapping feature coming in next update!")
-
-            st.markdown("### Quick Swaps")
-            swaps = st.session_state.meal_plan.get('swaps', [])
-            cols = st.columns(len(swaps))
-            for idx, swap in enumerate(swaps):
-                with cols[idx]:
-                    st.markdown(f"**{swap['emojis']}**")
-                    st.caption(swap['name'])
-
-    # -- TAB: SHOPPING --
-    with tab_shop:
-        if not st.session_state.meal_plan:
-            st.info("Generate a meal plan first to see your list.")
-        else:
-            st.markdown("### Grocery List")
-            
-            # Aggregate ingredients
-            shopping_list = {}
-            for meal in st.session_state.meal_plan['meals']:
-                for ing in meal.get('ingredients', []):
-                    cat = ing.get('category', 'Other')
-                    if cat not in shopping_list: shopping_list[cat] = []
-                    shopping_list[cat].append(f"{ing['qty']} {ing['item']}")
-            
-            for cat, items in shopping_list.items():
-                st.caption(cat.upper())
-                for item in items:
-                    st.checkbox(item, key=item)
-            
-            st.markdown("---")
-            st.caption("Export")
-            
-            # Prepare text for copy/email
-            list_text = "\n".join([f"{cat}:\n" + "\n".join([f"- {i}" for i in items]) for cat, items in shopping_list.items()])
-            
-            c1, c2 = st.columns(2)
-            if c1.button("📧 Email List"):
-                # Mailto link generator
-                import urllib.parse
-                subject = urllib.parse.quote("My Grocery List")
-                body = urllib.parse.quote(list_text)
-                st.markdown(f'<a href="mailto:?subject={subject}&body={body}" target="_blank">Click to Open Email Client</a>', unsafe_allow_html=True)
-            
-            if c2.button("📋 Copy Text"):
-                st.code(list_text)
-
-    # -- TAB: SETTINGS --
-    with tab_prefs:
-        st.markdown("### Preferences")
-        
-        with st.form("settings_form"):
-            loc = st.text_input("Location", value=st.session_state.prefs['location'])
-            size = st.number_input("Household Size", value=st.session_state.prefs['size'], min_value=1)
-            diet = st.text_input("Dietary Restrictions", value=st.session_state.prefs['diet'])
-            unit = st.selectbox("Units", ["imperial", "metric"], index=0 if st.session_state.prefs['unit']=='imperial' else 1)
-            
-            if st.form_submit_button("Save Changes"):
-                st.session_state.prefs = {
-                    'location': loc,
-                    'size': size,
-                    'diet': diet,
-                    'unit': unit
-                }
-                st.success("Settings saved!")
-                st.rerun()
-        
-        if st.button("Log Out", type="secondary"):
-            st.session_state.clear()
-            st.rerun()
+# --- TAB: FAVORITES ---
+with tab_f:
+    st.markdown("### Saved Favorites")
+    if not st.session_state.starred:
+        st.write("No favorites saved yet.")
+    else:
+        for f in st.session_state.starred:
+            st.success(f)
